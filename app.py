@@ -229,13 +229,47 @@ if uploaded_file and target_col:
             with st.spinner("Berechne..."):
                 paths_block, paths_arima, aic = execute_simulations(df_clean, target_col, horizon, n_sims, block_size)
                 
+                def german_format(val):
+                    # Formats a float into a German currency string (e.g., 1.234,56)
+                    return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
                 tab_arima, tab_block = st.tabs(["Parametrisch (ARIMA)", "Nicht-Parametrisch (Block Bootstrap)"])
+                
                 with tab_arima:
                     st.markdown(f"**ARIMA Residual Bootstrap**")
-                    st.plotly_chart(plot_forecast_chart(df_clean, paths_arima, target_col, "Strukturelle Prognose", "#4a148c", show_ci_80, show_ci_95), use_container_width=True)
+                    
+                    if paths_arima is not None:
+                        # Kennzahlen für letzten Prognosepunkt
+                        median_arima = np.median(paths_arima, axis=0)[-1]
+                        p90_arima = np.percentile(paths_arima, 90, axis=0)[-1]
+                        p95_arima = np.percentile(paths_arima, 95, axis=0)[-1]
+                        
+                        st.markdown("##### Kennzahlen für letzten Prognosezeitpunkt")
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Median", german_format(median_arima))
+                        col2.metric("P80 Obergrenze", german_format(p90_arima))
+                        col3.metric("95. Perzentil", german_format(p95_arima))
+
+                        st.plotly_chart(plot_forecast_chart(df_clean, paths_arima, target_col, "Strukturelle Prognose", "#4a148c", show_ci_80, show_ci_95), use_container_width=True)
+                    else:
+                        st.warning("ARIMA-Modell konnte nicht berechnet werden.")
+
                 with tab_block:
                     st.markdown(f"**Block Bootstrap** (Blockgröße: {block_size} M)")
-                    st.plotly_chart(plot_forecast_chart(df_clean, paths_block, target_col, "Stresstest-Szenario", "#e65100", show_ci_80, show_ci_95), use_container_width=True)
+                    
+                    if paths_block is not None:
+                        # Kennzahlen für letzten Prognosepunkt
+                        median_block = np.median(paths_block, axis=0)[-1]
+                        p90_block = np.percentile(paths_block, 90, axis=0)[-1]
+                        p95_block = np.percentile(paths_block, 95, axis=0)[-1]
+
+                        st.markdown("##### Kennzahlen für letzten Prognosezeitpunkt")
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Median", german_format(median_block))
+                        col2.metric("P80 Obergrenze", german_format(p90_block))
+                        col3.metric("95. Perzentil", german_format(p95_block))
+
+                        st.plotly_chart(plot_forecast_chart(df_clean, paths_block, target_col, "Stresstest-Szenario", "#e65100", show_ci_80, show_ci_95), use_container_width=True)
 
                 # --- CSV EXPORT LOGIK (NEU) ---
                 dates = pd.date_range(df_clean['Date'].iloc[0], periods=horizon+1, freq='MS')[1:]
