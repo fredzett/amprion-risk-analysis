@@ -197,7 +197,8 @@ with st.sidebar:
             uploaded_file.seek(0)
             df_raw = pd.read_csv(uploaded_file, delimiter=';', nrows=1)
             uploaded_file.seek(0)
-            numeric_cols = [c for c in df_raw.columns if 'datum' not in c.lower()]
+            exclude_terms = ['datum', 'date', 'zeit', 'time']
+            numeric_cols = [c for c in df_raw.columns if not any(term in c.lower() for term in exclude_terms)]            
             
             st.markdown("### 2. Modellparameter")
             target_col = st.selectbox("Zielvariable", numeric_cols)
