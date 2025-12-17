@@ -1,13 +1,17 @@
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
+from typing import Union
+from io import BytesIO
 
-def clean_currency(x):
+def clean_currency(x: Union[str, float]) -> float:
     if isinstance(x, str):
-        x = x.replace('.', '').replace(',', '.')
+        # If a comma exists, assume it's a German-style decimal separator
+        if ',' in x:
+            x = x.replace('.', '').replace(',', '.')
     return float(x)
 
-def load_and_prep_data(uploaded_file, selected_col):
+def load_and_prep_data(uploaded_file: BytesIO, selected_col: str) -> pd.DataFrame:
     # WICHTIG: Pointer auf Anfang setzen, falls die Datei vorher schon berührt wurde
     uploaded_file.seek(0)
     
@@ -61,7 +65,7 @@ def load_and_prep_data(uploaded_file, selected_col):
     
     return df_clean.dropna()
 
-def run_simulation_arima(df, col_name, horizon, n_sims):
+def run_simulation_arima(df: pd.DataFrame, col_name: str, horizon: int, n_sims: int) -> np.ndarray:
     # 1. Fit ARIMA (No Drift)
     model = ARIMA(df['LogReturns'], order=(1, 0, 1), trend='n')
     model_res = model.fit()
@@ -100,7 +104,7 @@ def run_simulation_arima(df, col_name, horizon, n_sims):
     price_paths = last_price * np.exp(cum_ret)
     return price_paths
 
-def run_simulation_block(df, col_name, horizon, n_sims, block_size=6):
+def run_simulation_block(df: pd.DataFrame, col_name: str, horizon: int, n_sims: int, block_size: int = 6) -> np.ndarray:
     returns = df['LogReturns'].values # Wir nehmen LogReturns für Konsistenz
     n = len(returns)
     last_price = df[col_name].iloc[-1]

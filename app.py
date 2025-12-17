@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from statsmodels.tsa.arima.model import ARIMA
+from logic import load_and_prep_data, run_simulation_arima, run_simulation_block
 
 # --- SEITEN-KONFIGURATION ---
 st.set_page_config(
@@ -43,93 +43,14 @@ st.markdown("""
 
 # --- BACKEND LOGIK ---
 
-def parse_currency_format(x):
-    """Konvertiert deutsche Zahlenformate (1.000,00) in Python-Floats (1000.00)."""
-    if isinstance(x, str):
-        # Tausenderpunkt entfernen, Dezimalkomma durch Punkt ersetzen
-        return float(x.replace('.', '').replace(',', '.'))
-    return float(x)
 
-@st.cache_data
-def ingest_data(file, target_col):
-    try:
-        file.seek(0)
-        # Semikolon-getrennte Datei lesen
-        df = pd.read_csv(file, delimiter=';')
-        
-        # Datum finden
-        print(df.columns)
-        date_cols = [c for c in df.columns if 'datum' in c.lower() or 'date' in c.lower()]
-        if not date_cols:
-            raise ValueError("Keine Datumsspalte gefunden.")
-        date_col = date_cols[0]
-        
-        # Zahlen parsen
-        df[target_col] = df[target_col].apply(parse_currency_format)
-        df['Date'] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
-        df = df.sort_values('Date', ascending=False)
-        
-        # Validierung
-        df = df[df[target_col] > 0].dropna(subset=[target_col, 'Date'])
-        df['LogReturns'] = np.log(df[target_col] / df[target_col].shift(-1))
-        
-        return df.dropna()
-    except Exception as e:
-        st.error(f"Fehler beim Datenimport: {str(e)}")
-        return pd.DataFrame()
-
-def execute_simulations(df, target_col, horizon, n_sims, block_size):
-    last_price = df[target_col].iloc[0]
-    returns = df['LogReturns'].values
-    
-    # --- MODEL A: BLOCK BOOTSTRAP ---
-    n_history = len(returns)
-    if block_size > n_history: block_size = n_history
-    blocks = [returns[i:i+block_size] for i in range(n_history - block_size + 1)]
-    
-    paths_block = np.zeros((n_sims, horizon))
-    for i in range(n_sims):
-        sim_path = []
-        while len(sim_path) < horizon:
-            idx = np.random.randint(len(blocks))
-            sim_path.extend(blocks[idx])
-        paths_block[i,:] = sim_path[:horizon]
-    prices_block = last_price * np.exp(np.cumsum(paths_block, axis=1))
-
-    # --- MODEL B: ARIMA RESIDUAL BOOTSTRAP ---
-    try:
-        # ARIMA model expects data to be sorted chronologically (oldest to newest)
-        model = ARIMA(df['LogReturns'].iloc[::-1], order=(1,0,1), trend='n').fit()
-        resid = model.resid.values - np.mean(model.resid.values)
-        ar_params, ma_params = model.params.get('ar.L1', 0), model.params.get('ma.L1', 0)
-        
-        # The last log return is the first item in the sorted df. The last residual corresponds to the newest data point.
-        last_y, last_eps = df['LogReturns'].iloc[0], resid[-1]
-        paths_arima = np.zeros((n_sims, horizon))
-        
-        for i in range(n_sims):
-            shocks = np.random.choice(resid, size=horizon, replace=True)
-            y, eps = [last_y], [last_eps]
-            sim_y_path = []
-            for t in range(horizon):
-                curr_y = ar_params*y[-1] + ma_params*eps[-1] + shocks[t]
-                sim_y_path.append(curr_y)
-                y.append(curr_y)
-                eps.append(shocks[t])
-            paths_arima[i,:] = np.array(sim_y_path)
-        prices_arima = last_price * np.exp(np.cumsum(paths_arima, axis=1))
-        
-        return prices_block, prices_arima, model.aic
-    except:
-        return prices_block, None, 0
-
+from typing import Union
 # --- VISUALISIERUNG ---
 
-def plot_historical_chart(df, target_col):
-    # Reverse dataframe for chronological plotting
-    df_plot = df.iloc[::-1]
+def plot_historical_chart(df: pd.DataFrame, target_col: str) -> go.Figure:
+    # Data is already sorted chronologically (ascending) from load_and_prep_data
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot[target_col], mode='lines', name='Historie', line=dict(color='#2c3e50', width=2)))
+    fig.add_trace(go.Scatter(x=df['datum'], y=df[target_col], mode='lines', name='Historie', line=dict(color='#2c3e50', width=2)))
     fig.update_layout(
         title=dict(text=f"Historische Zeitreihe: {target_col}", font=dict(size=18, color='#2c3e50')),
         xaxis=dict(title="Datum", showgrid=True, gridcolor='#ecf0f1'),
@@ -138,8 +59,8 @@ def plot_historical_chart(df, target_col):
     )
     return fig
 
-def plot_forecast_chart(df, paths, target_col, title, color_hex, show_ci_80, show_ci_95):
-    last_date = df['Date'].iloc[0]
+def plot_forecast_chart(df: pd.DataFrame, paths: np.ndarray, target_col: str, title: str, color_hex: str, show_ci_80: bool, show_ci_95: bool) -> go.Figure:
+    last_date = df['datum'].iloc[-1] # Data is sorted ascending, so last element is newest
     future_dates = pd.date_range(last_date, periods=paths.shape[1]+1, freq='MS')[1:]
     
     median_path = np.median(paths, axis=0)
@@ -147,9 +68,9 @@ def plot_forecast_chart(df, paths, target_col, title, color_hex, show_ci_80, sho
     p95 = np.percentile(paths, 95, axis=0)
     
     fig = go.Figure()
-    # Anschluss an Historie
-    hist_subset = df.iloc[:24].iloc[::-1] # Newest 24, reversed for chronological plot
-    fig.add_trace(go.Scatter(x=hist_subset['Date'], y=hist_subset[target_col], mode='lines', name='Historie (Auszug)', line=dict(color='#2c3e50', width=2)))
+    # Anschluss an Historie - take the last 24 items which are the newest
+    hist_subset = df.tail(24) 
+    fig.add_trace(go.Scatter(x=hist_subset['datum'], y=hist_subset[target_col], mode='lines', name='Historie (Auszug)', line=dict(color='#2c3e50', width=2)))
 
     if show_ci_80:
         fig.add_trace(go.Scatter(
@@ -199,6 +120,7 @@ with st.sidebar:
     if uploaded_file:
         try:
             uploaded_file.seek(0)
+            # Use a dummy delimiter that is unlikely to be in the header to read only the first row for column names
             df_raw = pd.read_csv(uploaded_file, delimiter=';', nrows=1)
             uploaded_file.seek(0)
             exclude_terms = ['datum', 'date', 'zeit', 'time']
@@ -215,10 +137,11 @@ with st.sidebar:
             show_ci_95 = st.checkbox("95. Perzentil (Risiko)", value=True)
             st.markdown("---")
             run_simulation = st.button("Simulation ausführen")
-        except: st.error("Dateifehler.")
+        except Exception as e:
+            st.error(f"Dateifehler oder Parameterproblem: {e}")
 
 if uploaded_file and target_col:
-    df_clean = ingest_data(uploaded_file, target_col)
+    df_clean = load_and_prep_data(uploaded_file, target_col)
     if not df_clean.empty:
         st.subheader("Datenbasis")
         st.plotly_chart(plot_historical_chart(df_clean, target_col), use_container_width=True)
@@ -227,12 +150,17 @@ if uploaded_file and target_col:
             st.divider()
             st.subheader("Prognoseergebnisse")
             with st.spinner("Berechne..."):
-                paths_block, paths_arima, aic = execute_simulations(df_clean, target_col, horizon, n_sims, block_size)
+                paths_block = run_simulation_block(df_clean, target_col, horizon, n_sims, block_size)
+                try:
+                    paths_arima = run_simulation_arima(df_clean, target_col, horizon, n_sims)
+                except Exception as e:
+                    paths_arima = None
+                    st.warning(f"ARIMA-Modell konnte nicht berechnet werden: {e}")
                 
-                def german_format(val):
+                def german_format(val: Union[float, int]) -> str:
                     # Formats a float into a German currency string (e.g., 1.234,56)
                     return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
+                
                 tab_arima, tab_block = st.tabs(["Parametrisch (ARIMA)", "Nicht-Parametrisch (Block Bootstrap)"])
                 
                 with tab_arima:
@@ -241,14 +169,16 @@ if uploaded_file and target_col:
                     if paths_arima is not None:
                         # Kennzahlen für letzten Prognosepunkt
                         median_arima = np.median(paths_arima, axis=0)[-1]
-                        p90_arima = np.percentile(paths_arima, 90, axis=0)[-1]
+                        p80_arima = np.percentile(paths_arima, 80, axis=0)[-1]
                         p95_arima = np.percentile(paths_arima, 95, axis=0)[-1]
                         
-                        st.markdown("##### Kennzahlen für letzten Prognosezeitpunkt")
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Median", german_format(median_arima))
-                        col2.metric("P80 Obergrenze", german_format(p90_arima))
-                        col3.metric("95. Perzentil", german_format(p95_arima))
+                        st.markdown("##### Kennzahlen")
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1.metric("Letzter Act. Wert", german_format(df_clean[target_col].iloc[-1]))
+                        col2.metric("Mittelwert", german_format(np.mean(paths_arima)))
+                        col3.metric("Median", german_format(median_arima))
+                        col4.metric("P80", german_format(p80_arima))
+                        col5.metric("P95", german_format(p95_arima))
 
                         st.plotly_chart(plot_forecast_chart(df_clean, paths_arima, target_col, "Strukturelle Prognose", "#4a148c", show_ci_80, show_ci_95), use_container_width=True)
                     else:
@@ -260,38 +190,42 @@ if uploaded_file and target_col:
                     if paths_block is not None:
                         # Kennzahlen für letzten Prognosepunkt
                         median_block = np.median(paths_block, axis=0)[-1]
-                        p90_block = np.percentile(paths_block, 90, axis=0)[-1]
+                        p80_block = np.percentile(paths_block, 80, axis=0)[-1]
                         p95_block = np.percentile(paths_block, 95, axis=0)[-1]
 
-                        st.markdown("##### Kennzahlen für letzten Prognosezeitpunkt")
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Median", german_format(median_block))
-                        col2.metric("P80 Obergrenze", german_format(p90_block))
-                        col3.metric("95. Perzentil", german_format(p95_block))
+                        st.markdown("##### Kennzahlen")
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1.metric("Letzter Act. Wert", german_format(df_clean[target_col].iloc[-1]))
+                        col2.metric("Mittelwert", german_format(np.mean(paths_block)))
+                        col3.metric("Median", german_format(median_block))
+                        col4.metric("P80", german_format(p80_block))
+                        col5.metric("P95", german_format(p95_block))
 
                         st.plotly_chart(plot_forecast_chart(df_clean, paths_block, target_col, "Stresstest-Szenario", "#e65100", show_ci_80, show_ci_95), use_container_width=True)
 
                 # --- CSV EXPORT LOGIK (NEU) ---
-                dates = pd.date_range(df_clean['Date'].iloc[0], periods=horizon+1, freq='MS')[1:]
+                dates = pd.date_range(df_clean['datum'].iloc[-1], periods=horizon+1, freq='MS')[1:]
                 
                 # 1. Historie aufbereiten
-                df_hist = df_clean[['Date', target_col]].copy()
+                df_hist = df_clean[['datum', target_col]].copy()
                 df_hist.columns = ['Datum', 'Historie']
                 
                 # 2. Prognose-Daten aufbereiten
                 df_forecast = pd.DataFrame({'Datum': dates})
                 
-                # ARIMA Stats
-                df_forecast['ARIMA_Median'] = np.median(paths_arima, axis=0)
-                df_forecast['ARIMA_Lower80'] = np.percentile(paths_arima, 10, axis=0) # Untere Grenze
-                df_forecast['ARIMA_Upper80'] = np.percentile(paths_arima, 90, axis=0) # Obere Grenze
-                df_forecast['ARIMA_P95'] = np.percentile(paths_arima, 95, axis=0)
+                if paths_arima is not None:
+                    # ARIMA Stats
+                    df_forecast['ARIMA_Median'] = np.median(paths_arima, axis=0)
+                    df_forecast['ARIMA_Lower80'] = np.percentile(paths_arima, 10, axis=0) # Untere Grenze
+                    df_forecast['ARIMA_Upper80'] = np.percentile(paths_arima, 90, axis=0) # Obere Grenze
+                    df_forecast['ARIMA_P95'] = np.percentile(paths_arima, 95, axis=0)
                 
-                # Block Stats
-                df_forecast['Block_Median'] = np.median(paths_block, axis=0)
-                df_forecast['Block_Lower80'] = np.percentile(paths_block, 10, axis=0)
-                df_forecast['Block_Upper80'] = np.percentile(paths_block, 90, axis=0)
-                df_forecast['Block_P95'] = np.percentile(paths_block, 95, axis=0)
+                if paths_block is not None:
+                    # Block Stats
+                    df_forecast['Block_Median'] = np.median(paths_block, axis=0)
+                    df_forecast['Block_Lower80'] = np.percentile(paths_block, 10, axis=0)
+                    df_forecast['Block_Upper80'] = np.percentile(paths_block, 90, axis=0)
+                    df_forecast['Block_P95'] = np.percentile(paths_block, 95, axis=0)
                 
                 # 3. Zusammenführen (Historie + Prognose)
                 df_export = pd.merge(df_hist, df_forecast, on='Datum', how='outer').sort_values('Datum', ascending=False)
