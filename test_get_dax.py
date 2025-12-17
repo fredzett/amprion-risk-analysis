@@ -7,6 +7,9 @@ ticker = "^GDAXI"
 # Hole Daten für ca. 10 Jahre (Puffer eingebaut)
 df = yf.download(ticker, start="2015-01-01", interval="1mo", progress=False)
 
+# Change date format to DD.MM.YYYY
+df.index = df.index.to_series().dt.strftime('%d.%m.%Y')
+
 # MultiIndex bereinigen (yfinance gibt oft (Price, Ticker) zurück)
 if isinstance(df.columns, pd.MultiIndex):
     try:

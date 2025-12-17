@@ -67,11 +67,11 @@ def ingest_data(file, target_col):
         # Zahlen parsen
         df[target_col] = df[target_col].apply(parse_currency_format)
         df['Date'] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
-        df = df.sort_values('Date')
+        df = df.sort_values('Date', ascending=False)
         
         # Validierung
         df = df[df[target_col] > 0].dropna(subset=[target_col, 'Date'])
-        df['LogReturns'] = np.log(df[target_col] / df[target_col].shift(1))
+        df['LogReturns'] = np.log(df[target_col] / df[target_col].shift(-1))
         
         return df.dropna()
     except Exception as e:
@@ -79,7 +79,7 @@ def ingest_data(file, target_col):
         return pd.DataFrame()
 
 def execute_simulations(df, target_col, horizon, n_sims, block_size):
-    last_price = df[target_col].iloc[-1]
+    last_price = df[target_col].iloc[0]
     returns = df['LogReturns'].values
     
     # --- MODEL A: BLOCK BOOTSTRAP ---
@@ -98,11 +98,13 @@ def execute_simulations(df, target_col, horizon, n_sims, block_size):
 
     # --- MODEL B: ARIMA RESIDUAL BOOTSTRAP ---
     try:
-        model = ARIMA(df['LogReturns'], order=(1,0,1), trend='n').fit()
+        # ARIMA model expects data to be sorted chronologically (oldest to newest)
+        model = ARIMA(df['LogReturns'].iloc[::-1], order=(1,0,1), trend='n').fit()
         resid = model.resid.values - np.mean(model.resid.values)
         ar_params, ma_params = model.params.get('ar.L1', 0), model.params.get('ma.L1', 0)
         
-        last_y, last_eps = df['LogReturns'].iloc[-1], resid[-1]
+        # The last log return is the first item in the sorted df. The last residual corresponds to the newest data point.
+        last_y, last_eps = df['LogReturns'].iloc[0], resid[-1]
         paths_arima = np.zeros((n_sims, horizon))
         
         for i in range(n_sims):
@@ -124,8 +126,10 @@ def execute_simulations(df, target_col, horizon, n_sims, block_size):
 # --- VISUALISIERUNG ---
 
 def plot_historical_chart(df, target_col):
+    # Reverse dataframe for chronological plotting
+    df_plot = df.iloc[::-1]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['Date'], y=df[target_col], mode='lines', name='Historie', line=dict(color='#2c3e50', width=2)))
+    fig.add_trace(go.Scatter(x=df_plot['Date'], y=df_plot[target_col], mode='lines', name='Historie', line=dict(color='#2c3e50', width=2)))
     fig.update_layout(
         title=dict(text=f"Historische Zeitreihe: {target_col}", font=dict(size=18, color='#2c3e50')),
         xaxis=dict(title="Datum", showgrid=True, gridcolor='#ecf0f1'),
@@ -135,7 +139,7 @@ def plot_historical_chart(df, target_col):
     return fig
 
 def plot_forecast_chart(df, paths, target_col, title, color_hex, show_ci_80, show_ci_95):
-    last_date = df['Date'].iloc[-1]
+    last_date = df['Date'].iloc[0]
     future_dates = pd.date_range(last_date, periods=paths.shape[1]+1, freq='MS')[1:]
     
     median_path = np.median(paths, axis=0)
@@ -144,7 +148,7 @@ def plot_forecast_chart(df, paths, target_col, title, color_hex, show_ci_80, sho
     
     fig = go.Figure()
     # Anschluss an Historie
-    hist_subset = df.iloc[-24:]
+    hist_subset = df.iloc[:24].iloc[::-1] # Newest 24, reversed for chronological plot
     fig.add_trace(go.Scatter(x=hist_subset['Date'], y=hist_subset[target_col], mode='lines', name='Historie (Auszug)', line=dict(color='#2c3e50', width=2)))
 
     if show_ci_80:
@@ -234,7 +238,7 @@ if uploaded_file and target_col:
                     st.plotly_chart(plot_forecast_chart(df_clean, paths_block, target_col, "Stresstest-Szenario", "#e65100", show_ci_80, show_ci_95), use_container_width=True)
 
                 # --- CSV EXPORT LOGIK (NEU) ---
-                dates = pd.date_range(df_clean['Date'].iloc[-1], periods=horizon+1, freq='MS')[1:]
+                dates = pd.date_range(df_clean['Date'].iloc[0], periods=horizon+1, freq='MS')[1:]
                 
                 # 1. Historie aufbereiten
                 df_hist = df_clean[['Date', target_col]].copy()
@@ -256,7 +260,7 @@ if uploaded_file and target_col:
                 df_forecast['Block_P95'] = np.percentile(paths_block, 95, axis=0)
                 
                 # 3. Zusammenführen (Historie + Prognose)
-                df_export = pd.merge(df_hist, df_forecast, on='Datum', how='outer').sort_values('Datum')
+                df_export = pd.merge(df_hist, df_forecast, on='Datum', how='outer').sort_values('Datum', ascending=False)
                 
                 # 4. Speichern mit deutschem Format (Semikolon und Komma)
                 csv_data = df_export.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig').encode('utf-8-sig')
