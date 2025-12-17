@@ -1,0 +1,15 @@
+# Ignore everything by default
+*
+
+# Explicitly keep required files
+!app.py
+!logic.py
+!requirements.txt
+
+# Keep the .gitignore file itself
+!.gitignore
+
+# Ignore specific directories and their contents
+.venv/
+__pycache__/
+.git/
